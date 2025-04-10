@@ -755,7 +755,9 @@ def PretrainedSpeakerEmbedding(
         return NeMoPretrainedSpeakerEmbedding(embedding, device=device)
 
     elif isinstance(embedding, str) and "wespeaker" in embedding:
-        return ONNXWeSpeakerPretrainedSpeakerEmbedding(embedding, device=device)
+        return PyannoteAudioPretrainedSpeakerEmbedding(
+            embedding, device=device, use_auth_token=use_auth_token
+        )
 
     else:
         # fallback to pyannote in case we are loading a local model

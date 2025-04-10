@@ -261,7 +261,11 @@ class SimAMResNet(nn.Module):
         return torch.tensor(0.0), embed
 
 
-def WeSpeakerSimAMResNet34(feat_dim=80, embed_dim=256, pooling_func="TSTP"):
+def WeSpeakerSimAMResNet34(num_mel_bins=80, feat_dim=None, embed_dim=256, pooling_func="TSTP"):
+    # Handle both parameter names to be backward compatible
+    if feat_dim is None:
+        feat_dim = num_mel_bins
+        
     return SimAMResNet(
         SimAMBasicBlock, 
         [3, 4, 6, 3], 
@@ -271,7 +275,11 @@ def WeSpeakerSimAMResNet34(feat_dim=80, embed_dim=256, pooling_func="TSTP"):
     )
 
 
-def WeSpeakerSimAMResNet100(feat_dim=80, embed_dim=256, pooling_func="TSTP"):
+def WeSpeakerSimAMResNet100(num_mel_bins=80, feat_dim=None, embed_dim=256, pooling_func="TSTP"):
+    # Handle both parameter names to be backward compatible
+    if feat_dim is None:
+        feat_dim = num_mel_bins
+        
     return SimAMResNet(
         SimAMBasicBlock, 
         [6, 16, 24, 3], 

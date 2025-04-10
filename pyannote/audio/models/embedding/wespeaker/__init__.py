@@ -37,6 +37,7 @@ from pyannote.audio.utils.receptive_field import (
 )
 
 from .resnet import ResNet34, ResNet152, ResNet221, ResNet293
+from .samresnet import WeSpeakerSimAMResNet34, WeSpeakerSimAMResNet100
 
 
 class BaseWeSpeakerResNet(Model):
@@ -454,8 +455,69 @@ class WeSpeakerResNet293(BaseWeSpeakerResNet):
             use_energy=use_energy,
             task=task,
         )
+
         self.resnet = ResNet293(
-            num_mel_bins, 256, pooling_func="TSTP", two_emb_layer=False
+            feat_dim=self.hparams.num_mel_bins, embed_dim=256, two_emb_layer=True
+        )
+
+
+class WeSpeakerSimAMResNet34(BaseWeSpeakerResNet):
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        num_channels: int = 1,
+        num_mel_bins: int = 80,
+        frame_length: int = 25,
+        frame_shift: int = 10,
+        dither: float = 0.0,
+        window_type: str = "hamming",
+        use_energy: bool = False,
+        task: Optional[Task] = None,
+    ):
+        super().__init__(
+            sample_rate=sample_rate,
+            num_channels=num_channels,
+            num_mel_bins=num_mel_bins,
+            frame_length=frame_length,
+            frame_shift=frame_shift,
+            dither=dither,
+            window_type=window_type,
+            use_energy=use_energy,
+            task=task,
+        )
+
+        self.resnet = WeSpeakerSimAMResNet34(
+            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP"
+        )
+
+
+class WeSpeakerSimAMResNet100(BaseWeSpeakerResNet):
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        num_channels: int = 1,
+        num_mel_bins: int = 80,
+        frame_length: int = 25,
+        frame_shift: int = 10,
+        dither: float = 0.0,
+        window_type: str = "hamming",
+        use_energy: bool = False,
+        task: Optional[Task] = None,
+    ):
+        super().__init__(
+            sample_rate=sample_rate,
+            num_channels=num_channels,
+            num_mel_bins=num_mel_bins,
+            frame_length=frame_length,
+            frame_shift=frame_shift,
+            dither=dither,
+            window_type=window_type,
+            use_energy=use_energy,
+            task=task,
+        )
+
+        self.resnet = WeSpeakerSimAMResNet100(
+            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP"
         )
 
 
@@ -464,4 +526,6 @@ __all__ = [
     "WeSpeakerResNet152",
     "WeSpeakerResNet221",
     "WeSpeakerResNet293",
+    "WeSpeakerSimAMResNet34",
+    "WeSpeakerSimAMResNet100",
 ]

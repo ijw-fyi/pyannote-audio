@@ -37,7 +37,7 @@ from pyannote.audio.utils.receptive_field import (
 )
 
 from .resnet import ResNet34, ResNet152, ResNet221, ResNet293
-from .samresnet import WeSpeakerSimAMResNet34, WeSpeakerSimAMResNet100
+from .samresnet import SimAMResNet34, SimAMResNet100
 
 
 class BaseWeSpeakerResNet(Model):
@@ -486,8 +486,8 @@ class WeSpeakerSimAMResNet34(BaseWeSpeakerResNet):
             task=task,
         )
 
-        self.resnet = WeSpeakerSimAMResNet34(
-            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP"
+        self.resnet = SimAMResNet34(
+            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP", two_emb_layer=False
         )
 
 
@@ -516,8 +516,8 @@ class WeSpeakerSimAMResNet100(BaseWeSpeakerResNet):
             task=task,
         )
 
-        self.resnet = WeSpeakerSimAMResNet100(
-            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP"
+        self.resnet = SimAMResNet100(
+            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP", two_emb_layer=False
         )
 
 

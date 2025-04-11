@@ -37,6 +37,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 import umap
 import hdbscan
+import scipy.linalg
 
 from pyannote.audio.core.io import AudioFile
 from pyannote.audio.pipelines.utils import oracle_segmentation
@@ -883,7 +884,170 @@ class UMAPClustering(BaseClustering):
             return np.zeros(num_embeddings, dtype=np.int8)
 
 
+class SpectralClustering(BaseClustering):
+    """Spectral clustering for speaker diarization
+    
+    This implementation is based on WeSpeaker's spectral clustering approach:
+    1. Compute cosine similarity matrix
+    2. Prune similarity matrix to make it sparse
+    3. Compute Laplacian
+    4. Perform spectral embedding
+    5. Apply k-means on the spectral embeddings
+    
+    Parameters
+    ----------
+    metric : {"cosine", "euclidean", ...}, optional
+        Distance metric to use. Defaults to "cosine".
+    max_num_embeddings : int, optional
+        Maximum number of embeddings to use for clustering.
+        Defaults to 1000.
+    constrained_assignment : bool, optional
+        Whether to use constrained assignment for clustering.
+        Defaults to False.
+        
+    Hyper-parameters
+    ----------------
+    p : float
+        Pruning parameter - percentage of similarity values to set to zero.
+    """
+
+    def __init__(
+        self,
+        metric: str = "cosine",
+        max_num_embeddings: int = 1000,
+        constrained_assignment: bool = False,
+    ):
+        super().__init__(
+            metric=metric,
+            max_num_embeddings=max_num_embeddings,
+            constrained_assignment=constrained_assignment,
+        )
+        
+        # Pruning parameter
+        self.p = Uniform(0.0, 0.2)
+
+    def cluster(
+        self,
+        embeddings: np.ndarray,
+        min_clusters: int,
+        max_clusters: int,
+        num_clusters: Optional[int] = None,
+    ) -> np.ndarray:
+        """Apply spectral clustering
+        
+        Parameters
+        ----------
+        embeddings : (num_embeddings, dimension) array
+            Embeddings to cluster
+        min_clusters : int
+            Minimum number of clusters
+        max_clusters : int
+            Maximum number of clusters
+        num_clusters : int, optional
+            Target number of clusters (if known)
+            
+        Returns
+        -------
+        clusters : (num_embeddings, ) array
+            0-indexed cluster indices
+        """
+        num_embeddings, _ = embeddings.shape
+        
+        # For very small number of embeddings, use simple assignment
+        if num_embeddings <= 2:
+            return np.zeros(num_embeddings, dtype=np.int8)
+            
+        # Define utility functions
+        def cosine_similarity(M):
+            M = M / np.linalg.norm(M, axis=1, keepdims=True)
+            return 0.5 * (1.0 + np.dot(M, M.T))
+
+        def prune(M, p):
+            m = M.shape[0]
+            if m < 1000:
+                n = max(m - 10, 2)
+            else:
+                n = int((1.0 - p) * m)
+
+            for i in range(m):
+                indexes = np.argsort(M[i, :])
+                low_indexes, high_indexes = indexes[0:n], indexes[n:m]
+                M[i, low_indexes] = 0.0
+                M[i, high_indexes] = 1.0
+            return 0.5 * (M + M.T)
+
+        def laplacian(M):
+            M[np.diag_indices(M.shape[0])] = 0.0
+            D = np.diag(np.sum(np.abs(M), axis=1))
+            return D - M
+
+        def spectral_embedding(M, num_spks, min_num_spks, max_num_spks):
+            # Compute eigenvalues and eigenvectors
+            eig_values, eig_vectors = scipy.linalg.eigh(M)
+            
+            # If num_spks is not provided, estimate using eigengap heuristic
+            if num_spks is None:
+                # Find the largest eigengap in the first max_num_spks eigenvalues
+                eigengaps = np.diff(eig_values[:max_num_spks + 1])
+                estimated_num_spks = np.argmax(eigengaps) + 1
+                num_spks = max(estimated_num_spks, min_num_spks)
+            
+            # Ensure num_spks is at least min_clusters
+            num_spks = max(num_spks, min_num_spks)
+            
+            # Return the eigenvectors corresponding to the smallest eigenvalues
+            return eig_vectors[:, :num_spks]
+
+        try:
+            # Compute similarity matrix
+            similarity_matrix = cosine_similarity(embeddings)
+            
+            # Prune matrix to make it sparse
+            pruned_similarity_matrix = prune(similarity_matrix, self.p)
+            
+            # Compute Laplacian matrix
+            laplacian_matrix = laplacian(pruned_similarity_matrix)
+            
+            # Determine number of clusters if not specified
+            target_clusters = num_clusters
+            if target_clusters is None:
+                # If min_clusters == max_clusters, use that value
+                if min_clusters == max_clusters:
+                    target_clusters = min_clusters
+            
+            # Compute spectral embeddings
+            spectral_embeddings = spectral_embedding(
+                laplacian_matrix,
+                target_clusters,
+                min_clusters,
+                max_clusters
+            )
+            
+            # Use k-means to cluster the spectral embeddings
+            # The number of clusters is determined by the number of dimensions
+            # in the spectral embeddings
+            from sklearn.cluster import KMeans
+            n_clusters = spectral_embeddings.shape[1]
+            kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+            labels = kmeans.fit_predict(spectral_embeddings)
+            
+            # Ensure we have the right number of clusters if specifically requested
+            unique_clusters = np.unique(labels)
+            if num_clusters is not None and len(unique_clusters) != num_clusters:
+                # Try again with exact number of clusters
+                kmeans = KMeans(n_clusters=num_clusters, n_init=10, random_state=42)
+                labels = kmeans.fit_predict(embeddings)
+            
+            return labels
+            
+        except Exception as e:
+            # Fallback to single cluster if any errors occur
+            print(f"Error in spectral clustering: {e}")
+            return np.zeros(num_embeddings, dtype=np.int8)
+
+
 class Clustering(Enum):
     AgglomerativeClustering = AgglomerativeClustering
     OracleClustering = OracleClustering
     UMAPClustering = UMAPClustering
+    SpectralClustering = SpectralClustering

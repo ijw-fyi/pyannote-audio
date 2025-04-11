@@ -33,7 +33,7 @@ import pyannote.audio.models.embedding.wespeaker as wespeaker
 from pyannote.audio import Model
 from pyannote.audio.core.task import Problem, Resolution, Specifications
 from pyannote.audio.models.embedding.wespeaker import BaseWeSpeakerResNet
-from pyannote.audio.models.embedding.wespeaker.samresnet import SimAMResNet, SimAMBasicBlock
+from pyannote.audio.models.embedding.wespeaker.samresnet import SimAMResNet, SimAMBasicBlock, SimAMResNet34, SimAMResNet100
 
 wespeaker_checkpoint_dir = sys.argv[1]  # /path/to/wespeaker_cnceleb-resnet34-LM
 
@@ -58,10 +58,11 @@ if is_simam:
             class WeSpeakerSimAMResNet100(BaseWeSpeakerResNet):
                 def __init__(self, **kwargs):
                     super().__init__(**kwargs)
-                    num_blocks = [6, 16, 24, 3]
-                    self.resnet = SimAMResNet(
-                        SimAMBasicBlock, num_blocks, 
-                        feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP"
+                    self.resnet = SimAMResNet100(
+                        feat_dim=self.hparams.num_mel_bins, 
+                        embed_dim=256, 
+                        pooling_func="ASP", 
+                        two_emb_layer=False
                     )
             Klass = WeSpeakerSimAMResNet100
         else:

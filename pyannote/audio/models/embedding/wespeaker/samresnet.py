@@ -53,7 +53,35 @@ class TSTP(nn.Module):
         return self.out_dim
 
 
-POOLING_LAYERS = {"TSTP": TSTP}
+class ASP(nn.Module):
+    """Attentive statistics pooling"""
+    def __init__(self, in_planes, acoustic_dim):
+        super(ASP, self).__init__()
+        outmap_size = int(acoustic_dim / 8)
+        self.out_dim = in_planes * 8 * outmap_size * 2
+
+        self.attention = nn.Sequential(
+            nn.Conv1d(in_planes * 8 * outmap_size, 128, kernel_size=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Conv1d(128, in_planes * 8 * outmap_size, kernel_size=1),
+            nn.Softmax(dim=2),
+        )
+
+    def forward(self, x):
+        x = x.reshape(x.size()[0], -1, x.size()[-1])
+        w = self.attention(x)
+        mu = torch.sum(x * w, dim=2)
+        sg = torch.sqrt((torch.sum((x**2) * w, dim=2) - mu**2).clamp(min=1e-5))
+        x = torch.cat((mu, sg), 1)
+        x = x.view(x.size()[0], -1)
+        return x
+
+    def get_out_dim(self):
+        return self.out_dim
+
+
+POOLING_LAYERS = {"TSTP": TSTP, "ASP": ASP}
 
 
 class SimAMBasicBlock(nn.Module):
@@ -159,9 +187,15 @@ class SimAMResNet(nn.Module):
         self.layer3 = self._make_layer(block, m_channels * 4, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, m_channels * 8, num_blocks[3], stride=2)
 
-        self.pool = POOLING_LAYERS[pooling_func](
-            in_dim=self.stats_dim * block.expansion
-        )
+        if pooling_func == "ASP":
+            self.pool = POOLING_LAYERS[pooling_func](
+                in_planes=m_channels * 8,
+                acoustic_dim=feat_dim
+            )
+        else:
+            self.pool = POOLING_LAYERS[pooling_func](
+                in_dim=self.stats_dim * block.expansion
+            )
         self.pool_out_dim = self.pool.get_out_dim()
         self.seg_1 = nn.Linear(self.pool_out_dim, embed_dim)
 

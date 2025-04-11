@@ -35,6 +35,8 @@ from pyannote.pipeline.parameter import Categorical, Integer, Uniform
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
+import umap
+import hdbscan
 
 from pyannote.audio.core.io import AudioFile
 from pyannote.audio.pipelines.utils import oracle_segmentation
@@ -556,6 +558,332 @@ class OracleClustering(BaseClustering):
         return hard_clusters, soft_clusters, centroids
 
 
+class UMAPClustering(BaseClustering):
+    """UMAP + HDBSCAN + PAHC clustering
+    
+    This implementation is based on WeSpeaker's clustering method which uses:
+    1. UMAP for dimensionality reduction
+    2. HDBSCAN for density-based clustering
+    3. PAHC (Progressive Agglomerative Hierarchical Clustering) for post-processing
+    
+    Parameters
+    ----------
+    metric : {"cosine", "euclidean", ...}, optional
+        Distance metric to use. Defaults to "cosine".
+    max_num_embeddings : int, optional
+        Maximum number of embeddings to use for clustering.
+        Defaults to 1000.
+    constrained_assignment : bool, optional
+        Whether to use constrained assignment for clustering.
+        Defaults to False.
+        
+    Hyper-parameters
+    ----------------
+    n_components : int
+        Number of dimensions to reduce to with UMAP.
+    n_neighbors : int
+        Number of neighbors to consider in UMAP.
+    min_dist : float
+        Minimum distance between points in UMAP.
+    hdbscan_min_cluster_size : int
+        Minimum cluster size for HDBSCAN.
+    pahc_merge_cutoff : float
+        Similarity threshold for merging clusters in PAHC.
+    pahc_min_cluster_size : int
+        Minimum size of clusters after PAHC processing.
+    pahc_absorb_cutoff : float
+        Similarity threshold for absorbing small clusters in PAHC.
+    """
+
+    def __init__(
+        self,
+        metric: str = "cosine",
+        max_num_embeddings: int = 1000,
+        constrained_assignment: bool = False,
+    ):
+        super().__init__(
+            metric=metric,
+            max_num_embeddings=max_num_embeddings,
+            constrained_assignment=constrained_assignment,
+        )
+        
+        # UMAP parameters
+        self.n_components = Integer(2, 64)
+        self.n_neighbors = Integer(5, 50)
+        self.min_dist = Uniform(0.0, 0.5)
+        
+        # HDBSCAN parameters
+        self.hdbscan_min_cluster_size = Integer(2, 10)
+        
+        # PAHC parameters
+        self.pahc_merge_cutoff = Uniform(0.0, 1.0)
+        self.pahc_min_cluster_size = Integer(1, 10)
+        self.pahc_absorb_cutoff = Uniform(-0.5, 0.5)
+
+    def _pahc_fit_predict(self, labels, embeddings):
+        """Progressive Agglomerative Hierarchical Clustering
+        
+        This method implements the PAHC algorithm from WeSpeaker for
+        post-processing clustering results.
+        
+        Parameters
+        ----------
+        labels : np.ndarray
+            Initial cluster labels from HDBSCAN
+        embeddings : np.ndarray
+            Original embeddings
+            
+        Returns
+        -------
+        labels : np.ndarray
+            Refined cluster labels
+        """
+        # Step 1: Initialize structures
+        label_map = {}
+        cost_map = {}
+        heap = []
+        active_clusters = set()
+        
+        # Build label map (which embeddings belong to which cluster)
+        for i, label in enumerate(labels):
+            if label not in label_map:
+                label_map[label] = []
+            label_map[label].append(i)
+        
+        # Handle noise points (label -1) by assigning them to new clusters
+        num_labeled = len(label_map)
+        if -1 in label_map:
+            num_labeled -= 1
+            for i, j in zip(
+                range(num_labeled, num_labeled + len(label_map[-1])),
+                label_map[-1]
+            ):
+                label_map[i] = [j]
+            del label_map[-1]
+        
+        # Initialize active clusters
+        N = len(label_map)
+        active_clusters = set(range(N))
+        next_index = N
+        
+        # Compute costs between all cluster pairs
+        for i in range(N):
+            for j in range(i + 1, N):
+                i_indexes, j_indexes = label_map[i], label_map[j]
+                
+                # Skip pairs of predefined clusters (both < num_labeled)
+                if i < num_labeled and j < num_labeled:
+                    cost_map[(i, j)] = -np.inf
+                    continue
+                
+                # Compute similarity between clusters
+                i_embedding = sum([
+                    embeddings[idx] / np.linalg.norm(embeddings[idx]) 
+                    for idx in i_indexes
+                ])
+                j_embedding = sum([
+                    embeddings[idx] / np.linalg.norm(embeddings[idx])
+                    for idx in j_indexes
+                ])
+                cost_map[(i, j)] = np.dot(i_embedding, j_embedding)
+                
+                # Add to heap if similarity is high enough
+                factor = len(i_indexes) * len(j_indexes)
+                normalized_cost = cost_map[(i, j)] / factor
+                if normalized_cost >= self.pahc_merge_cutoff:
+                    heap.append((-normalized_cost, (i, j)))
+        
+        # Convert to heap structure
+        import heapq
+        heapq.heapify(heap)
+        
+        # Step 2: Merge clusters progressively
+        def eliminate(cluster_id):
+            del label_map[cluster_id]
+            active_clusters.remove(cluster_id)
+            
+        while heap:
+            _, (i, j) = heapq.heappop(heap)
+            if i in active_clusters and j in active_clusters:
+                # Merge clusters i and j
+                i_indexes, j_indexes = label_map[i], label_map[j]
+                
+                for k in label_map.keys():
+                    if k == i or k == j:
+                        continue
+                    # Compute cost between new merged cluster and existing clusters
+                    pair1 = (k, i) if k < i else (i, k)
+                    pair2 = (k, j) if k < j else (j, k)
+                    cost = cost_map.get(pair1, -np.inf) + cost_map.get(pair2, -np.inf)
+                    cost_map[(k, next_index)] = cost
+                    
+                    factor = (len(i_indexes) + len(j_indexes)) * len(label_map[k])
+                    normalized_cost = cost / factor
+                    if normalized_cost >= self.pahc_merge_cutoff:
+                        heapq.heappush(heap, (-normalized_cost, (k, next_index)))
+                
+                # Create new merged cluster
+                label_map[next_index] = i_indexes + j_indexes
+                active_clusters.add(next_index)
+                eliminate(i)
+                eliminate(j)
+                next_index += 1
+        
+        # Step 3: Absorb small clusters into larger ones
+        minor_clusters = set()
+        major_clusters = set()
+        
+        for k, indexes in label_map.items():
+            if len(indexes) < self.pahc_min_cluster_size:
+                minor_clusters.add(k)
+            else:
+                major_clusters.add(k)
+        
+        if len(major_clusters) > 0:
+            for i in minor_clusters:
+                max_cost = -np.inf
+                closest_cluster = -1
+                
+                for j in major_clusters:
+                    pair = (i, j) if i < j else (j, i)
+                    i_indexes, j_indexes = label_map[i], label_map[j]
+                    
+                    if pair in cost_map:
+                        factor = len(i_indexes) * len(j_indexes)
+                        normalized_cost = cost_map[pair] / factor
+                        
+                        if normalized_cost > max_cost:
+                            max_cost = normalized_cost
+                            closest_cluster = j
+                
+                if max_cost >= self.pahc_absorb_cutoff and closest_cluster != -1:
+                    label_map[closest_cluster].extend(label_map[i])
+                    eliminate(i)
+        
+        # Step 4: Relabel clusters
+        new_labels = [-1] * len(labels)
+        for label, indexes in label_map.items():
+            for index in indexes:
+                new_labels[index] = label
+                
+        # Remap labels to be consecutive integers
+        i = 0
+        label_to_label = {}
+        for label in new_labels:
+            if label not in label_to_label:
+                label_to_label[label] = i
+                i += 1
+                
+        for i in range(len(new_labels)):
+            new_labels[i] = label_to_label[new_labels[i]]
+            
+        return np.array(new_labels)
+
+    def cluster(
+        self,
+        embeddings: np.ndarray,
+        min_clusters: int,
+        max_clusters: int,
+        num_clusters: Optional[int] = None,
+    ) -> np.ndarray:
+        """Apply UMAP+HDBSCAN+PAHC clustering
+        
+        Parameters
+        ----------
+        embeddings : (num_embeddings, dimension) array
+            Embeddings to cluster
+        min_clusters : int
+            Minimum number of clusters
+        max_clusters : int
+            Maximum number of clusters
+        num_clusters : int, optional
+            Target number of clusters (if known)
+            
+        Returns
+        -------
+        clusters : (num_embeddings, ) array
+            0-indexed cluster indices
+        """
+        num_embeddings, dimension = embeddings.shape
+        
+        # For very small number of embeddings, use simple assignment
+        if num_embeddings <= 2:
+            return np.zeros(num_embeddings, dtype=np.int8)
+        
+        # Use min(32, num_embeddings-2) as the upper limit for n_components
+        n_components = min(self.n_components, num_embeddings - 2)
+        
+        try:
+            # UMAP dimensionality reduction
+            umap_embeddings = umap.UMAP(
+                n_components=n_components,
+                metric=self.metric,
+                n_neighbors=self.n_neighbors,
+                min_dist=self.min_dist,
+                random_state=1234,
+                n_jobs=1
+            ).fit_transform(embeddings)
+            
+            # HDBSCAN clustering
+            labels = hdbscan.HDBSCAN(
+                min_cluster_size=self.hdbscan_min_cluster_size,
+                allow_single_cluster=True,
+                approx_min_span_tree=False,
+                core_dist_n_jobs=1
+            ).fit_predict(umap_embeddings)
+            
+            # PAHC post-processing
+            labels = self._pahc_fit_predict(labels, embeddings)
+            
+            # Count clusters
+            unique_labels = np.unique(labels)
+            unique_labels = unique_labels[unique_labels >= 0]
+            num_detected_clusters = len(unique_labels)
+            
+            # If we detect fewer clusters than min_clusters, 
+            # try to enforce the minimum number of clusters
+            if num_detected_clusters < min_clusters and num_clusters is None:
+                # Try to get at least min_clusters by using a different approach
+                from sklearn.cluster import KMeans
+                kmeans = KMeans(n_clusters=min_clusters, random_state=1234, n_init=10)
+                labels = kmeans.fit_predict(embeddings)
+            
+            # If we detect more clusters than max_clusters,
+            # try to reduce to max_clusters
+            elif num_detected_clusters > max_clusters:
+                # Merge smallest clusters 
+                from sklearn.cluster import AgglomerativeClustering
+                agg = AgglomerativeClustering(
+                    n_clusters=max_clusters, 
+                    affinity='cosine', 
+                    linkage='average'
+                )
+                labels = agg.fit_predict(embeddings)
+                
+            # If specific num_clusters is requested, enforce it
+            elif num_clusters is not None and num_detected_clusters != num_clusters:
+                from sklearn.cluster import KMeans
+                kmeans = KMeans(n_clusters=num_clusters, random_state=1234, n_init=10)
+                labels = kmeans.fit_predict(embeddings)
+                
+            # Count clusters again after potential adjustments
+            unique_labels = np.unique(labels)
+            unique_labels = unique_labels[unique_labels >= 0]
+            num_detected_clusters = len(unique_labels)
+            
+            # Fallback if everything else fails
+            if num_detected_clusters < 1:
+                return np.zeros(num_embeddings, dtype=np.int8)
+                
+            return labels
+            
+        except Exception as e:
+            # Fallback to single cluster if any errors occur
+            print(f"Error in UMAP+HDBSCAN+PAHC clustering: {e}")
+            return np.zeros(num_embeddings, dtype=np.int8)
+
+
 class Clustering(Enum):
     AgglomerativeClustering = AgglomerativeClustering
     OracleClustering = OracleClustering
+    UMAPClustering = UMAPClustering

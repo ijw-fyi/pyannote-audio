@@ -487,7 +487,9 @@ class WeSpeakerSimAMResNet34(BaseWeSpeakerResNet):
         )
 
         self.resnet = SimAMResNet34(
-            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP", two_emb_layer=False
+            feat_dim=self.hparams.num_mel_bins, 
+            embed_dim=256, 
+            pooling_func="ASP"
         )
 
 
@@ -517,7 +519,9 @@ class WeSpeakerSimAMResNet100(BaseWeSpeakerResNet):
         )
 
         self.resnet = SimAMResNet100(
-            feat_dim=self.hparams.num_mel_bins, embed_dim=256, pooling_func="TSTP", two_emb_layer=False
+            feat_dim=self.hparams.num_mel_bins, 
+            embed_dim=256, 
+            pooling_func="ASP"
         )
 
 

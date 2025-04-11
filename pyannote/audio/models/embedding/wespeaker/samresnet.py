@@ -87,31 +87,37 @@ POOLING_LAYERS = {"TSTP": TSTP, "ASP": ASP}
 class SimAMBasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, stride=1):
+    def __init__(
+        self, ConvLayer, NormLayer, in_planes, planes, stride=1, block_id=1
+    ):
         super(SimAMBasicBlock, self).__init__()
-        self.stride = stride
-        self.conv1 = nn.Conv2d(
-            in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False
+        self.conv1 = ConvLayer(
+            in_planes,
+            planes,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
         )
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(
+        self.bn1 = NormLayer(planes)
+        self.conv2 = ConvLayer(
             planes, planes, kernel_size=3, stride=1, padding=1, bias=False
         )
-        self.bn2 = nn.BatchNorm2d(planes)
+        self.bn2 = NormLayer(planes)
         self.relu = nn.ReLU(inplace=True)
         self.sigmoid = nn.Sigmoid()
 
         self.downsample = nn.Sequential()
         if stride != 1 or in_planes != self.expansion * planes:
             self.downsample = nn.Sequential(
-                nn.Conv2d(
+                ConvLayer(
                     in_planes,
                     self.expansion * planes,
                     kernel_size=1,
                     stride=stride,
                     bias=False,
                 ),
-                nn.BatchNorm2d(self.expansion * planes),
+                NormLayer(self.expansion * planes),
             )
 
     def SimAM(self, X, lambda_p=1e-4):
@@ -158,6 +164,59 @@ class SimAMBasicBlock(nn.Module):
         return out
 
 
+class ResNet(nn.Module):
+    def __init__(
+        self, in_planes, block, num_blocks, in_ch=1, **kwargs
+    ):
+        super(ResNet, self).__init__()
+        self.in_planes = in_planes
+        self.NormLayer = nn.BatchNorm2d
+        self.ConvLayer = nn.Conv2d
+
+        self.conv1 = self.ConvLayer(
+            in_ch, in_planes, kernel_size=3, stride=1, padding=1, bias=False
+        )
+        self.bn1 = self.NormLayer(in_planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.layer1 = self._make_layer(
+            block, in_planes, num_blocks[0], stride=1, block_id=1
+        )
+        self.layer2 = self._make_layer(
+            block, in_planes * 2, num_blocks[1], stride=2, block_id=2
+        )
+        self.layer3 = self._make_layer(
+            block, in_planes * 4, num_blocks[2], stride=2, block_id=3
+        )
+        self.layer4 = self._make_layer(
+            block, in_planes * 8, num_blocks[3], stride=2, block_id=4
+        )
+
+    def _make_layer(self, block, planes, num_blocks, stride, block_id=1):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+        for stride in strides:
+            layers.append(
+                block(
+                    self.ConvLayer,
+                    self.NormLayer,
+                    self.in_planes,
+                    planes,
+                    stride,
+                    block_id,
+                )
+            )
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        return x
+
+
 class SimAMResNet(nn.Module):
     def __init__(
         self,
@@ -166,152 +225,44 @@ class SimAMResNet(nn.Module):
         m_channels=64,
         feat_dim=80,
         embed_dim=256,
-        pooling_func="TSTP",
-        two_emb_layer=False,
+        pooling_func="ASP",
     ):
         super(SimAMResNet, self).__init__()
-        self.in_planes = m_channels
-        self.feat_dim = feat_dim
-        self.embed_dim = embed_dim
-        self.stats_dim = int(feat_dim / 8) * m_channels * 8
-        self.two_emb_layer = two_emb_layer
-
-        self.conv1 = nn.Conv2d(
-            1, m_channels, kernel_size=3, stride=1, padding=1, bias=False
+        self.front = ResNet(m_channels, block, num_blocks)
+        self.pooling = POOLING_LAYERS[pooling_func](
+            in_planes=m_channels,
+            acoustic_dim=feat_dim
         )
-        self.bn1 = nn.BatchNorm2d(m_channels)
-        self.relu = nn.ReLU(inplace=True)
-        
-        self.layer1 = self._make_layer(block, m_channels, num_blocks[0], stride=1)
-        self.layer2 = self._make_layer(block, m_channels * 2, num_blocks[1], stride=2)
-        self.layer3 = self._make_layer(block, m_channels * 4, num_blocks[2], stride=2)
-        self.layer4 = self._make_layer(block, m_channels * 8, num_blocks[3], stride=2)
-
-        if pooling_func == "ASP":
-            self.pool = POOLING_LAYERS[pooling_func](
-                in_planes=m_channels * 8,
-                acoustic_dim=feat_dim
-            )
-        else:
-            self.pool = POOLING_LAYERS[pooling_func](
-                in_dim=self.stats_dim * block.expansion
-            )
-        self.pool_out_dim = self.pool.get_out_dim()
-        self.seg_1 = nn.Linear(self.pool_out_dim, embed_dim)
-
-    def _make_layer(self, block, planes, num_blocks, stride):
-        strides = [stride] + [1] * (num_blocks - 1)
-        layers = []
-        for stride in strides:
-            layers.append(block(self.in_planes, planes, stride))
-            self.in_planes = planes * block.expansion
-        return nn.Sequential(*layers)
-
-    @lru_cache
-    def num_frames(self, num_samples: int) -> int:
-        """Compute number of output frames"""
-        num_frames = num_samples
-        num_frames = conv1d_num_frames(
-            num_frames, kernel_size=3, stride=1, padding=1, dilation=1
-        )
-        for layers in [self.layer1, self.layer2, self.layer3, self.layer4]:
-            for layer in layers:
-                num_frames = layer.num_frames(num_frames)
-
-        return num_frames
-
-    def receptive_field_size(self, num_frames: int = 1) -> int:
-        """Compute size of receptive field"""
-        receptive_field_size = num_frames
-        for layers in reversed([self.layer1, self.layer2, self.layer3, self.layer4]):
-            for layer in reversed(layers):
-                receptive_field_size = layer.receptive_field_size(receptive_field_size)
-
-        receptive_field_size = conv1d_receptive_field_size(
-            num_frames=receptive_field_size,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            dilation=1,
-        )
-
-        return receptive_field_size
-
-    def receptive_field_center(self, frame: int = 0) -> int:
-        """Compute center of receptive field"""
-        receptive_field_center = frame
-        for layers in reversed([self.layer1, self.layer2, self.layer3, self.layer4]):
-            for layer in reversed(layers):
-                receptive_field_center = layer.receptive_field_center(
-                    frame=receptive_field_center
-                )
-
-        receptive_field_center = conv1d_receptive_field_center(
-            frame=receptive_field_center,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            dilation=1,
-        )
-
-        return receptive_field_center
-
-    def forward_frames(self, fbank: torch.Tensor) -> torch.Tensor:
-        """Extract frame-wise embeddings"""
-        fbank = fbank.permute(0, 2, 1)  # (B,T,F) => (B,F,T)
-        fbank = fbank.unsqueeze_(1)
-        out = self.relu(self.bn1(self.conv1(fbank)))
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.layer4(out)
-        return out
-
-    def forward_embedding(
-        self, frames: torch.Tensor, weights: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """Extract speaker embeddings"""
-        stats = self.pool(frames, weights=weights)
-        embed = self.seg_1(stats)
-        # Return in same format as original ResNet models
-        # First tensor is dummy to match existing API
-        return torch.tensor(0.0), embed
+        self.bottleneck = nn.Linear(self.pooling.out_dim, embed_dim)
 
     def forward(self, fbank: torch.Tensor, weights: Optional[torch.Tensor] = None):
         """Extract speaker embeddings"""
         fbank = fbank.permute(0, 2, 1)  # (B,T,F) => (B,F,T)
         fbank = fbank.unsqueeze_(1)
-        out = self.relu(self.bn1(self.conv1(fbank)))
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.layer4(out)
-
-        stats = self.pool(out, weights=weights)
-        embed = self.seg_1(stats)
+        out = self.front(fbank)
+        out = self.pooling(out)
+        embed = self.bottleneck(out)
         
         # Return in same format as original ResNet models
         # First tensor is dummy to match existing API
         return torch.tensor(0.0), embed
 
 
-def SimAMResNet34(feat_dim=80, embed_dim=256, pooling_func="TSTP", two_emb_layer=False):
+def SimAMResNet34(feat_dim=80, embed_dim=256, pooling_func="ASP"):
     return SimAMResNet(
         SimAMBasicBlock, 
         [3, 4, 6, 3], 
         feat_dim=feat_dim, 
         embed_dim=embed_dim, 
-        pooling_func=pooling_func,
-        two_emb_layer=two_emb_layer
+        pooling_func=pooling_func
     )
 
 
-def SimAMResNet100(feat_dim=80, embed_dim=256, pooling_func="TSTP", two_emb_layer=False):
+def SimAMResNet100(feat_dim=80, embed_dim=256, pooling_func="ASP"):
     return SimAMResNet(
         SimAMBasicBlock, 
         [6, 16, 24, 3], 
         feat_dim=feat_dim, 
         embed_dim=embed_dim, 
-        pooling_func=pooling_func,
-        two_emb_layer=two_emb_layer
+        pooling_func=pooling_func
     ) 

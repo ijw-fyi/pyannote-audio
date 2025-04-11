@@ -61,8 +61,7 @@ if is_simam:
                     self.resnet = SimAMResNet100(
                         feat_dim=self.hparams.num_mel_bins, 
                         embed_dim=256, 
-                        pooling_func="ASP", 
-                        two_emb_layer=False
+                        pooling_func="ASP"
                     )
             Klass = WeSpeakerSimAMResNet100
         else:
